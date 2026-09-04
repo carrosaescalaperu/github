@@ -546,6 +546,15 @@ def exportar_a_excel(df: pd.DataFrame, ruta_salida: str) -> None:
     for fila in range(2, ws.max_row + 1):
         ws.row_dimensions[fila].height = 60
 
+    # Forzar la columna "Escala" como TEXTO — si no, Excel interpreta
+    # "1:18" como una hora y la muestra como un número decimal raro.
+    if "Escala" in columnas_orden:
+        col_idx = columnas_orden.index("Escala") + 1
+        col_letra = get_column_letter(col_idx)
+        for fila in range(2, ws.max_row + 1):
+            celda = ws[f"{col_letra}{fila}"]
+            celda.number_format = "@"
+
     wb.save(ruta_salida)
     logger.info(f"Excel generado: {ruta_salida}  ({len(df)} productos)")
 
@@ -625,6 +634,12 @@ def main():
                 df_internos_out[col] = df_internos_out[col].map(
                     lambda v: f"{v:.2f}".replace(".", ",") if pd.notna(v) else v
                 )
+        # Proteger "Escala" (ej. "1:18") para que Excel no la interprete como
+        # una hora al abrir el CSV directamente. El truco =\"...\" fuerza texto.
+        if "Escala" in df_internos_out.columns:
+            df_internos_out["Escala"] = df_internos_out["Escala"].map(
+                lambda v: f'="{v}"' if pd.notna(v) and v != "" else v
+            )
         df_internos_out.to_csv("precios_internos.csv", index=False, encoding="utf-8-sig")
         logger.info("CSV interno (costos/márgenes) guardado: precios_internos.csv")
 
@@ -801,18 +816,31 @@ TABLAS_ENVIO_POR_CATEGORIA = {
 }
 
 
-def extraer_denominador_escala(escala: str):
-    """De un texto de escala tipo '1/24' extrae el denominador (24) como int.
+def extraer_denominador_escala(escala) -> int | None:
+    """De un texto de escala tipo '1:24' o '1/24' extrae el denominador (24)
+    como int. También soporta el caso en que Excel haya corrompido el
+    valor a un número decimal tipo fracción (ej. 0.0416666 == 1/24).
     Devuelve None si no se pudo interpretar."""
-    if not escala:
+    if escala is None or escala == "":
         return None
-    match = re.search(r"1\s*/\s*(\d+)", str(escala))
-    if not match:
-        return None
+
+    # Caso 1: viene como texto "1:24" o "1/24"
+    match = re.search(r"1\s*[:/]\s*(\d+)", str(escala))
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            pass
+
+    # Caso 2: Excel lo convirtió a número decimal (ej. 0.0416666 == 1/24)
     try:
-        return int(match.group(1))
-    except ValueError:
-        return None
+        valor = float(str(escala).replace(",", "."))
+        if 0 < valor < 1:
+            return round(1 / valor)
+    except (ValueError, TypeError):
+        pass
+
+    return None
 
 
 def precio_envio_por_escala(categoria: str, escala: str) -> float:
