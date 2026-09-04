@@ -744,14 +744,143 @@ PALABRAS_CLAVE_MINIATURA = [
     "keychain", "keyring", "magnet", "pin badge", "mini", "miniature",
 ]
 
-# Precio de envío (en tu moneda) por categoría. AJUSTAR estos valores
-# libremente — es lo único que necesitas tocar si cambian tus tarifas.
-PRECIOS_ENVIO = {
-    "miniatura": 2.00,
-    "estandar": 4.00,
-    "camion": 10.00,
-    "avion": 10.00,
+PALABRAS_CLAVE_MOTO = [
+    "motorcycle", "motorbike", "scooter", "moped", "quad bike", "atv",
+]
+
+# --- Tablas de envío por escala, según categoría ---
+# Cada tupla es (denominador_min, denominador_max, precio). Un denominador
+# más GRANDE significa un modelo más CHICO (ej. 1/43 es más chico que 1/18).
+# None en denominador_max significa "sin límite superior" (denom >= min);
+# None en denominador_min significa "sin límite inferior" (denom <= max).
+TABLA_ENVIO_COCHES = [
+    (43, None, 2),   # 1/43 y más pequeños
+    (24, 42, 3),     # entre 1/42 y 1/24
+    (19, 23, 5),     # entre 1/23 y 1/19
+    (18, 18, 7),     # 1/18
+    (12, 17, 10),    # entre 1/17 y 1/12
+    (None, 10, 14),  # 1/10 y más grandes
+]
+
+TABLA_ENVIO_CAMIONES = [
+    (43, None, 5),
+    (24, 42, 10),
+    (19, 23, 14),
+    (18, 18, 7),
+    (12, 17, 20),
+    (None, 10, 30),
+]
+
+TABLA_ENVIO_AVIONES = [
+    (43, None, 110),
+    (24, 42, 14),
+    (19, 23, 20),
+    (18, 18, 7),
+    (12, 17, 30),
+    (None, 10, 50),
+]
+
+TABLA_ENVIO_MOTOS = [
+    (18, 18, 2),
+    (12, 12, 3),
+    (6, 6, 10),
+]
+
+TABLA_ENVIO_MINIATURA = [
+    (5, 5, 2),
+    (4, 4, 3),
+    (2, 2, 5),
+]
+
+TABLAS_ENVIO_POR_CATEGORIA = {
+    "estandar": TABLA_ENVIO_COCHES,
+    "camion": TABLA_ENVIO_CAMIONES,
+    "avion": TABLA_ENVIO_AVIONES,
+    "moto": TABLA_ENVIO_MOTOS,
+    "miniatura": TABLA_ENVIO_MINIATURA,
 }
+
+
+def extraer_denominador_escala(escala: str):
+    """De un texto de escala tipo '1/24' extrae el denominador (24) como int.
+    Devuelve None si no se pudo interpretar."""
+    if not escala:
+        return None
+    match = re.search(r"1\s*/\s*(\d+)", str(escala))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def precio_envio_por_escala(categoria: str, escala: str) -> float:
+    """
+    Busca el precio de envío según la tabla de la categoría y el
+    denominador de la escala. Si el denominador cae exactamente dentro de
+    un rango de la tabla, usa ese precio. Si cae en un hueco entre dos
+    rangos (denominador no cubierto), promedia el precio del rango
+    inmediatamente más chico (denom mayor) y el inmediatamente más
+    grande (denom menor). Si no hay escala reconocible, usa el precio
+    "estándar" por defecto de esa categoría (rango 1/18) como respaldo.
+    """
+    tabla = TABLAS_ENVIO_POR_CATEGORIA.get(categoria, TABLA_ENVIO_COCHES)
+    denom = extraer_denominador_escala(escala)
+
+    if denom is None:
+        # Sin escala reconocible: usar un valor intermedio de la tabla
+        precios_tabla = [p for (_, _, p) in tabla]
+        return sum(precios_tabla) / len(precios_tabla)
+
+    # 1) Coincidencia exacta dentro de algún rango
+    for lo, hi, precio in tabla:
+        dentro_min = (lo is None) or (denom >= lo)
+        dentro_max = (hi is None) or (denom <= hi)
+        if dentro_min and dentro_max:
+            return precio
+
+    # 2) No hay coincidencia exacta.
+    #    Para "moto" y "miniatura": promediar entre el rango más cercano
+    #    por arriba y por abajo (como se pidió).
+    #    Para el resto (estandar, camion, avion): NO promediar, usar el
+    #    precio del rango cuyo límite esté más cerca del denominador buscado.
+    vecino_mayor_denom = None   # rango con denom > el buscado (modelo más chico), el más cercano
+    vecino_menor_denom = None   # rango con denom < el buscado (modelo más grande), el más cercano
+
+    for lo, hi, precio in tabla:
+        # Extremo "chico" (denom alto) de este rango
+        extremo_alto = hi if hi is not None else float("inf")
+        extremo_bajo = lo if lo is not None else 0
+
+        if extremo_bajo > denom:
+            if vecino_mayor_denom is None or extremo_bajo < vecino_mayor_denom[0]:
+                vecino_mayor_denom = (extremo_bajo, precio)
+        if extremo_alto < denom:
+            if vecino_menor_denom is None or extremo_alto > vecino_menor_denom[0]:
+                vecino_menor_denom = (extremo_alto, precio)
+
+    if categoria in ("moto", "miniatura"):
+        if vecino_mayor_denom and vecino_menor_denom:
+            return (vecino_mayor_denom[1] + vecino_menor_denom[1]) / 2
+        elif vecino_mayor_denom:
+            return vecino_mayor_denom[1]
+        elif vecino_menor_denom:
+            return vecino_menor_denom[1]
+        else:
+            return tabla[0][2]
+    else:
+        # Sin promedio: elegir el límite más cercano al denominador buscado
+        if vecino_mayor_denom and vecino_menor_denom:
+            dist_mayor = abs(vecino_mayor_denom[0] - denom)
+            dist_menor = abs(vecino_menor_denom[0] - denom)
+            return vecino_mayor_denom[1] if dist_mayor <= dist_menor else vecino_menor_denom[1]
+        elif vecino_mayor_denom:
+            return vecino_mayor_denom[1]
+        elif vecino_menor_denom:
+            return vecino_menor_denom[1]
+        else:
+            return tabla[0][2]
 
 
 def clasificar_categoria_envio(nombre: str) -> str:
@@ -761,6 +890,7 @@ def clasificar_categoria_envio(nombre: str) -> str:
       - "miniatura": cascos, figuras, muñequitos, llaveros, etc.
       - "avion": aviones, helicópteros, etc.
       - "camion": camiones, buses, tractores, etc.
+      - "moto": motos, scooters, cuatrimotos, etc.
       - "estandar": autos normales (todo lo demás).
     """
     texto = (nombre or "").lower()
@@ -770,6 +900,8 @@ def clasificar_categoria_envio(nombre: str) -> str:
         return "avion"
     if any(palabra in texto for palabra in PALABRAS_CLAVE_CAMION):
         return "camion"
+    if any(palabra in texto for palabra in PALABRAS_CLAVE_MOTO):
+        return "moto"
     return "estandar"
 
 
@@ -786,7 +918,10 @@ def asignar_categoria_envio(df: pd.DataFrame, ruta_excepciones: str) -> pd.DataF
         18-16023R,camion
     """
     df["Categoria_Envio"] = df["Nombre"].apply(clasificar_categoria_envio)
-    df["Precio_Envio"] = df["Categoria_Envio"].map(PRECIOS_ENVIO).fillna(PRECIOS_ENVIO["estandar"])
+    df["Precio_Envio"] = df.apply(
+        lambda fila: precio_envio_por_escala(fila["Categoria_Envio"], fila.get("Escala")),
+        axis=1,
+    )
 
     if os.path.exists(ruta_excepciones):
         try:
@@ -797,6 +932,9 @@ def asignar_categoria_envio(df: pd.DataFrame, ruta_excepciones: str) -> pd.DataF
                 sku = fila.get("SKU")
                 if sku in excepciones:
                     df.at[i, "Categoria_Envio"] = excepciones[sku]
+                    df.at[i, "Precio_Envio"] = precio_envio_por_escala(
+                        excepciones[sku], fila.get("Escala")
+                    )
                     aplicadas += 1
             logger.info(f"Excepciones de envío aplicadas: {aplicadas} producto(s).")
         except Exception as e:
