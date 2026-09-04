@@ -169,8 +169,8 @@ def login_con_requests(session: requests.Session) -> bool:
         token = token_input["value"] if token_input else None
 
         payload = {
-            "email": usuario,      # <-- AJUSTAR nombre real del campo
-            "password": clave,     # <-- AJUSTAR nombre real del campo
+            "username": usuario,   # confirmado: input name="username" (no "email")
+            "password": clave,
         }
         if token:
             payload["token"] = token  # <-- AJUSTAR nombre real del campo CSRF
@@ -178,9 +178,8 @@ def login_con_requests(session: requests.Session) -> bool:
         resp = session.post(LOGIN_URL, data=payload, headers=HEADERS, timeout=15)
         resp.raise_for_status()
 
-        # AJUSTAR: texto que solo aparece cuando el login fue exitoso
-        # (ej. "Cerrar sesión", "Mi cuenta", el nombre del usuario, etc.)
-        indicadores_login_ok = ["cerrar sesión", "mi cuenta", "logout"]
+        # Confirmado: cuando el login es exitoso aparece "Welcome" y "Log out"
+        indicadores_login_ok = ["log out", "welcome"]
         texto_resp = resp.text.lower()
 
         if any(ind in texto_resp for ind in indicadores_login_ok):
@@ -223,43 +222,29 @@ def extraer_productos_de_pagina(html: str, url_pagina: str) -> list[dict]:
 
     for tarjeta in tarjetas:
         try:
-            # --- Filtro de stock: saltar productos marcados como agotados ---
-            # AJUSTAR: clase/texto que el sitio usa para marcar "sin stock"
-            fuera_de_stock = tarjeta.select_one(".out-of-stock, .no-stock, .agotado")
-            if fuera_de_stock:
+            # --- Filtro de stock: saltar productos que NO están disponibles ---
+            # Confirmado: div.availableText con texto "available" cuando hay stock.
+            disponible_tag = tarjeta.select_one(".availableText")
+            texto_disponible = disponible_tag.get_text(strip=True).lower() if disponible_tag else ""
+            if "available" not in texto_disponible:
                 continue
 
             # --- Nombre / descripción ---
-            nombre_tag = tarjeta.select_one(".row-two.hidden-xs")  # <-- AJUSTAR
+            nombre_tag = tarjeta.select_one(".row-two.hidden-xs")
             nombre = nombre_tag.get_text(strip=True) if nombre_tag else ""
 
-            # --- URL del producto (por si luego quieres entrar al detalle) ---
-            url_producto = nombre_tag["href"] if nombre_tag and nombre_tag.has_attr("href") else None
-            if url_producto:
-                url_producto = urljoin(BASE_URL, url_producto)
-
-            # --- SKU / referencia ---
-            sku_tag = tarjeta.select_one("row-one.hidden-xs")  # <-- AJUSTAR
-            sku = sku_tag.get_text(strip=True) if sku_tag else ""
+            # --- URL del producto y precio confirmado en .price ---
+            enlace_tag = tarjeta.select_one(".thumb a")
+            url_producto = urljoin(BASE_URL, enlace_tag["href"]) if enlace_tag and enlace_tag.has_attr("href") else None
 
             # --- Precio ---
-            precio_tag = tarjeta.select_one(".price, .product-price")  # <-- AJUSTAR
+            precio_tag = tarjeta.select_one(".price b")
             precio_texto = precio_tag.get_text(strip=True) if precio_tag else ""
             precio = limpiar_precio(precio_texto)
 
-            # --- Imagen en alta resolución ---
-            img_tag = tarjeta.select_one(".col-sm-4.col-xs-12 img")
-            imagen_url = None
-            if img_tag:
-                # Muchos catálogos usan lazy-loading: la URL real puede estar
-                # en data-src / data-full-size-image en vez de src.
-                imagen_url = (
-                    img_tag.get("data-full-size-image")
-                    or img_tag.get("data-src")
-                    or img_tag.get("src")
-                )
-                if imagen_url:
-                    imagen_url = urljoin(BASE_URL, imagen_url)
+            # --- Imagen (confirmado: URL absoluta ya viene completa en src) ---
+            img_tag = tarjeta.select_one(".thumb img")
+            imagen_url = img_tag.get("src") if img_tag else None
 
             # --- Marca / Fabricante y Escala ---
             # Muchos catálogos de este rubro no separan marca/escala en campos
