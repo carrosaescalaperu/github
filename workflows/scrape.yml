@@ -1,0 +1,34 @@
+name: Scraper diario
+
+on:
+  schedule:
+    - cron: "0 11 * * *"   # 11:00 UTC = 06:00 hora Perú (UTC-5)
+  workflow_dispatch: {}     # permite ejecutarlo manualmente desde GitHub
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repo
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: |
+          pip install requests beautifulsoup4 pandas openpyxl lxml playwright
+          playwright install --with-deps chromium
+
+      - name: Ejecutar scraper
+        run: python scraper_modelcarswholesale.py --engine playwright
+
+      - name: Commitear catálogo actualizado
+        run: |
+          git config user.name "scraper-bot"
+          git config user.email "scraper-bot@users.noreply.github.com"
+          git add productos_actuales.csv
+          git diff --staged --quiet || git commit -m "Actualizacion diaria de catalogo"
+          git push
