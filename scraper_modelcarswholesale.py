@@ -423,13 +423,16 @@ def scrapear_con_playwright(usar_login: bool = False) -> pd.DataFrame:
             clave = os.getenv("MCW_PASS")
             if usuario and clave:
                 try:
-                    page.goto(f"{BASE_URL}/login", timeout=30000)  # <-- AJUSTAR
-                    # AJUSTAR selectores de los campos de login reales:
-                    page.fill('input[name="email"]', usuario)       # <-- AJUSTAR
-                    page.fill('input[name="password"]', clave)      # <-- AJUSTAR
-                    page.click('button[type="submit"]')             # <-- AJUSTAR
+                    page.goto(f"{BASE_URL}/login", timeout=30000)
+                    page.fill('input[name="username"]', usuario)
+                    page.fill('input[name="password"]', clave)
+                    page.click('button:has-text("Sign in")')
                     page.wait_for_load_state("domcontentloaded")
-                    logger.info("Login realizado (Motor B - Playwright).")
+                    # Confirmar login real (no solo que la página cargó)
+                    if "log out" in page.content().lower() or "welcome" in page.content().lower():
+                        logger.info("Login realizado (Motor B - Playwright).")
+                    else:
+                        logger.warning("El login no se pudo confirmar (no aparece 'Log out'/'Welcome').")
                 except Exception as e:
                     logger.error(f"No se pudo iniciar sesión con Playwright: {e}")
             else:
