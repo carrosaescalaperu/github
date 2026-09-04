@@ -18,13 +18,15 @@ jobs:
           python-version: "3.11"
 
       - name: Instalar dependencias
-        run: pip install requests beautifulsoup4 pandas openpyxl lxml
+        run: |
+          pip install requests beautifulsoup4 pandas openpyxl lxml playwright
+          playwright install --with-deps chromium
 
       - name: Ejecutar scraper
         env:
           MCW_USER: ${{ secrets.MCW_USER }}
           MCW_PASS: ${{ secrets.MCW_PASS }}
-        run: python scraper_modelcarswholesale.py --engine requests --login
+        run: python scraper_modelcarswholesale.py --engine playwright --login
 
       - name: Commitear catálogo actualizado
         run: |
