@@ -81,7 +81,7 @@ BASE_URL = "https://www.modelcarswholesale.com"
 # "Special Offers" y copia la URL exacta que te da el navegador.
 
 CATALOG_SECTIONS = {
-    "available": "/search?keyword=&scale=all&type=available&country=all&page=101",
+    "available": "/search?keyword=&scale=all&type=available&country=all&page=1",
 }
 
 HEADERS = {
@@ -292,13 +292,15 @@ def extraer_productos_de_pagina(html: str, url_pagina: str) -> list[dict]:
 
 
 def limpiar_precio(texto: str) -> str:
-    """Extrae solo el valor numérico de un string de precio (ej. '€ 45,90' -> '45.90')."""
+    """Extrae solo el valor numérico de un string de precio (ej. '€ 28.80' -> '28.80').
+    El sitio usa punto como separador decimal (no coma), así que solo se
+    quitan comas (posible separador de miles, ej. '1,234.56')."""
     if not texto:
         return ""
     match = re.search(r"[\d.,]+", texto)
     if not match:
         return ""
-    numero = match.group(0).replace(".", "").replace(",", ".")
+    numero = match.group(0).replace(",", "")
     try:
         return f"{float(numero):.2f}"
     except ValueError:
@@ -393,11 +395,17 @@ def scrapear_con_requests(usar_login: bool = False) -> pd.DataFrame:
 # 4. MOTOR B — Playwright (recomendado si hay bot-detection, y necesario
 #    si vas a iniciar sesión para ver precios de distribuidor)
 # ==============================================================================
-def scrapear_con_playwright(usar_login: bool = False) -> pd.DataFrame:
+def scrapear_con_playwright(usar_login: bool = False, visible: bool = False, debug_port: int | None = None) -> pd.DataFrame:
     """
-    Motor B: usa un navegador real (headless) para esquivar bot-detection y,
+    Motor B: usa un navegador real para esquivar bot-detection y,
     opcionalmente, iniciar sesión antes de scrapear.
     Requiere: pip install playwright  &&  playwright install chromium
+
+    Si debug_port se especifica, en vez de lanzar un navegador nuevo (que
+    Cloudflare puede detectar como automatizado y dejarte en loop infinito
+    de verificación), se conecta a un Chrome real que TÚ abriste a mano.
+    Esto pasa el check de Cloudflare sin problema porque ese Chrome no tiene
+    ninguna marca de automatización.
     """
     from playwright.sync_api import sync_playwright
 
@@ -405,17 +413,23 @@ def scrapear_con_playwright(usar_login: bool = False) -> pd.DataFrame:
 
     
     with sync_playwright() as p:
-        # Lanza su propio navegador headless (no depende de tu compu ni de un
-        # Chrome abierto). Así puede correr en GitHub Actions sin supervisión.
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = browser.new_context(
-            user_agent=HEADERS["User-Agent"],
-            locale="es-ES",
-        )
-        page = context.new_page()
+        if debug_port:
+            # Conectarse al Chrome "títere" que ya abriste a mano
+            browser = p.chromium.connect_over_cdp(f"http://localhost:{debug_port}")
+            context = browser.contexts[0]
+            page = context.new_page()
+        else:
+            # Lanza su propio navegador. En modo visible (--visible) puedes
+            # resolver tú mismo el check de seguridad de Cloudflare con un clic.
+            browser = p.chromium.launch(
+                headless=not visible,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                locale="es-ES",
+            )
+            page = context.new_page()
 
 
         if usar_login:
@@ -424,7 +438,14 @@ def scrapear_con_playwright(usar_login: bool = False) -> pd.DataFrame:
             if usuario and clave:
                 try:
                     page.goto(f"{BASE_URL}/login", timeout=30000)
-                    page.wait_for_timeout(2000)
+                    if visible:
+                        logger.info(
+                            "Si aparece el check de Cloudflare, resuélvelo manualmente "
+                            "en la ventana del navegador. Esperando hasta 90s..."
+                        )
+                        page.wait_for_selector('input[name="username"]', timeout=90000)
+                    else:
+                        page.wait_for_timeout(2000)
                     page.fill('input[name="username"]', usuario)
                     page.fill('input[name="password"]', clave)
                     page.click('button:has-text("Sign in")')
@@ -545,14 +566,36 @@ def main():
         action="store_true",
         help="Intenta iniciar sesión con las credenciales MCW_USER / MCW_PASS (variables de entorno).",
     )
+    parser.add_argument(
+        "--visible",
+        action="store_true",
+        help="Abre el navegador visible (no headless) para poder resolver checks de seguridad manualmente.",
+    )
+    parser.add_argument(
+        "--debugport",
+        type=int,
+        default=None,
+        help="Conecta a un Chrome real que abriste a mano con --remote-debugging-port=PUERTO (evita el loop de Cloudflare).",
+    )
+    parser.add_argument(
+        "--maxpages",
+        type=int,
+        default=None,
+        help="Límite de páginas a scrapear (para pruebas rápidas, ej. --maxpages 2). Sin esto, recorre el catálogo completo.",
+    )
     args = parser.parse_args()
 
     logger.info(f"Iniciando scraping con motor: {args.engine}")
 
+    if args.maxpages:
+        global MAX_PAGES_PER_SECTION
+        MAX_PAGES_PER_SECTION = args.maxpages
+        logger.info(f"Modo prueba: limitado a {args.maxpages} página(s) por sección.")
+
     if args.engine == "requests":
         df = scrapear_con_requests(usar_login=args.login)
     else:
-        df = scrapear_con_playwright(usar_login=args.login)
+        df = scrapear_con_playwright(usar_login=args.login, visible=args.visible, debug_port=args.debugport)
 
     logger.info(f"Total de productos extraídos (todas las secciones): {len(df)}")
 
@@ -562,8 +605,265 @@ def main():
     # subir/commitear, y para que tu Google Sheet / Worker lo lean siempre
     # del mismo lugar.
     if not df.empty:
-        df.to_csv("productos_actuales.csv", index=False, encoding="utf-8-sig")
-        logger.info("CSV fijo actualizado: productos_actuales.csv")
+        df = asignar_categoria_envio(df, "excepciones_envio.csv")
+        df = calcular_precios(df, "margenes_manuales.csv")
+
+        # --- Archivo INTERNO (te quedas tú, nunca se sube a GitHub) ---
+        columnas_internas = [
+            "SKU", "Nombre", "Marca", "Trademark", "Escala", "Categoria_Envio",
+            "FOB", "Precio_Envio", "Costo", "Margen", "Precio_Venta_Neto",
+            "IGV", "Precio_Publico", "Ganancia",
+        ]
+        # Usar coma como separador decimal en los números (formato local)
+        columnas_numericas_internas = [
+            "FOB", "Precio_Envio", "Costo", "Margen",
+            "Precio_Venta_Neto", "IGV", "Precio_Publico", "Ganancia",
+        ]
+        df_internos_out = df[columnas_internas].copy()
+        for col in columnas_numericas_internas:
+            if col in df_internos_out.columns:
+                df_internos_out[col] = df_internos_out[col].map(
+                    lambda v: f"{v:.2f}".replace(".", ",") if pd.notna(v) else v
+                )
+        df_internos_out.to_csv("precios_internos.csv", index=False, encoding="utf-8-sig")
+        logger.info("CSV interno (costos/márgenes) guardado: precios_internos.csv")
+
+        # --- Archivo PÚBLICO (este sí se sube, solo precio final) ---
+        columnas_publicas = [
+            "SKU", "Nombre", "Marca", "Trademark", "Escala",
+            "Categoria_Envio", "Imagen_URL", "URL_Producto", "Precio_Publico",
+        ]
+        df_publico = df[columnas_publicas].rename(columns={"Precio_Publico": "Precio"})
+        df_publico.to_csv("productos_actuales.csv", index=False, encoding="utf-8-sig")
+        logger.info("CSV público (solo precio final) actualizado: productos_actuales.csv")
+
+        subir_a_github()
+
+
+def calcular_precios(df: pd.DataFrame, ruta_margenes: str) -> pd.DataFrame:
+    """
+    Calcula, para cada producto:
+      Costo            = (FOB + Precio_Envio) * 1.04
+      Margen           = 1.45 si Precio_Publico (probando ese margen) < 200, si no 1.25
+      Precio_Venta_Neto= Costo * Margen
+      Precio_Publico   = Precio_Venta_Neto * 1.18   (IGV 18%)
+      Ganancia         = Precio_Venta_Neto - Costo
+
+    Si existe margenes_manuales.csv (columnas SKU, Margen), ese margen
+    fijo se usa en vez de la regla de los 200 — para casos especiales.
+    Nunca se sobrescribe automáticamente: es tuyo, lo editas a mano.
+    """
+    df["FOB"] = pd.to_numeric(df["Precio"], errors="coerce").fillna(0)
+    # Costo en soles: (FOB + envío) * 1.04 * 4 (tipo de cambio aprox. USD/EUR -> PEN)
+    df["Costo"] = (df["FOB"] + df["Precio_Envio"]) * 1.04 * 4
+
+    margenes_manuales = {}
+    if os.path.exists(ruta_margenes):
+        try:
+            df_margenes = pd.read_csv(ruta_margenes, encoding="utf-8-sig")
+            margenes_manuales = df_margenes.set_index("SKU")["Margen"].to_dict()
+        except Exception as e:
+            logger.warning(f"No se pudo leer margenes_manuales.csv: {e}")
+
+    margenes, ventas_netas, igvs, publicos, ganancias = [], [], [], [], []
+    for _, fila in df.iterrows():
+        sku = fila.get("SKU")
+        costo = fila["Costo"]
+
+        if sku in margenes_manuales:
+            margen = margenes_manuales[sku]
+        else:
+            # Probar primero el margen alto (1.45); si el precio público
+            # resultante se pasa de 200, usar el margen bajo (1.25).
+            precio_prueba = costo * 1.45 * 1.18
+            margen = 1.45 if precio_prueba < 200 else 1.25
+
+        venta_neta = costo * margen
+        igv = venta_neta * 0.18
+        publico = venta_neta + igv
+        ganancia = venta_neta - costo
+
+        margenes.append(margen)
+        ventas_netas.append(round(venta_neta, 2))
+        igvs.append(round(igv, 2))
+        publicos.append(round(publico, 2))
+        ganancias.append(round(ganancia, 2))
+
+    df["Margen"] = margenes
+    df["Precio_Venta_Neto"] = ventas_netas
+    df["IGV"] = igvs
+    df["Precio_Publico"] = publicos
+    df["Ganancia"] = ganancias
+
+    # --- Precio final manual (gana siempre sobre el cálculo automático) ---
+    # Archivo aparte que TÚ mantienes: precios_finales_manuales.csv
+    #   SKU,Precio_Publico
+    #   18-16023R,45.90
+    # El scraper nunca lo sobrescribe. Si un SKU está ahí, ese precio se usa
+    # tal cual (recalculando venta neta/IGV/ganancia hacia atrás para que el
+    # desglose interno siga siendo consistente).
+    ruta_precios_finales = "precios_finales_manuales.csv"
+    if os.path.exists(ruta_precios_finales):
+        try:
+            df_precios_finales = pd.read_csv(ruta_precios_finales, encoding="utf-8-sig")
+            overrides = df_precios_finales.set_index("SKU")["Precio_Publico"].to_dict()
+            aplicados = 0
+            for i, fila in df.iterrows():
+                sku = fila.get("SKU")
+                if sku in overrides:
+                    publico_manual = float(overrides[sku])
+                    venta_neta_manual = publico_manual / 1.18
+                    df.at[i, "Precio_Publico"] = round(publico_manual, 2)
+                    df.at[i, "Precio_Venta_Neto"] = round(venta_neta_manual, 2)
+                    df.at[i, "IGV"] = round(publico_manual - venta_neta_manual, 2)
+                    df.at[i, "Ganancia"] = round(venta_neta_manual - fila["Costo"], 2)
+                    aplicados += 1
+            logger.info(f"Precios finales manuales aplicados: {aplicados} producto(s).")
+        except Exception as e:
+            logger.warning(f"No se pudo leer precios_finales_manuales.csv: {e}")
+
+    return df
+
+
+# Palabras clave (en inglés, porque el catálogo del proveedor está en
+# inglés) para detectar vehículos grandes y aviones (envío distinto al
+# de un auto estándar). AJUSTAR/agregar las que falten.
+PALABRAS_CLAVE_CAMION = [
+    "truck", "bus", "coach", "tractor", "trailer", "semi",
+    "van", "fire engine", "firetruck", "pickup", "crane",
+    "bulldozer", "excavator", "cement mixer", "tanker",
+]
+
+PALABRAS_CLAVE_AVION = [
+    "aircraft", "airplane", "plane", "jet", "helicopter",
+    "airliner", "fighter", "bomber", "biplane", "glider",
+]
+
+PALABRAS_CLAVE_MINIATURA = [
+    "helmet", "figure", "figurine", "doll", "statue", "bust",
+    "keychain", "keyring", "magnet", "pin badge", "mini", "miniature",
+]
+
+# Precio de envío (en tu moneda) por categoría. AJUSTAR estos valores
+# libremente — es lo único que necesitas tocar si cambian tus tarifas.
+PRECIOS_ENVIO = {
+    "miniatura": 2.00,
+    "estandar": 4.00,
+    "camion": 10.00,
+    "avion": 10.00,
+}
+
+
+def clasificar_categoria_envio(nombre: str) -> str:
+    """
+    Detecta automáticamente la categoría de envío según palabras clave
+    (en inglés) en el nombre/descripción del producto:
+      - "miniatura": cascos, figuras, muñequitos, llaveros, etc.
+      - "avion": aviones, helicópteros, etc.
+      - "camion": camiones, buses, tractores, etc.
+      - "estandar": autos normales (todo lo demás).
+    """
+    texto = (nombre or "").lower()
+    if any(palabra in texto for palabra in PALABRAS_CLAVE_MINIATURA):
+        return "miniatura"
+    if any(palabra in texto for palabra in PALABRAS_CLAVE_AVION):
+        return "avion"
+    if any(palabra in texto for palabra in PALABRAS_CLAVE_CAMION):
+        return "camion"
+    return "estandar"
+
+
+def asignar_categoria_envio(df: pd.DataFrame, ruta_excepciones: str) -> pd.DataFrame:
+    """
+    1. Clasifica todos los productos automáticamente por palabras clave.
+    2. Si existe excepciones_envio.csv (con columnas SKU, Categoria_Envio),
+       esas asignaciones manuales ganan siempre sobre la detección
+       automática — para los casos raros que el detector no identifica bien.
+
+    excepciones_envio.csv es un archivo que TÚ mantienes a mano (el
+    scraper nunca lo sobrescribe), con formato:
+        SKU,Categoria_Envio
+        18-16023R,camion
+    """
+    df["Categoria_Envio"] = df["Nombre"].apply(clasificar_categoria_envio)
+    df["Precio_Envio"] = df["Categoria_Envio"].map(PRECIOS_ENVIO).fillna(PRECIOS_ENVIO["estandar"])
+
+    if os.path.exists(ruta_excepciones):
+        try:
+            df_excepciones = pd.read_csv(ruta_excepciones, encoding="utf-8-sig")
+            excepciones = df_excepciones.set_index("SKU")["Categoria_Envio"].to_dict()
+            aplicadas = 0
+            for i, fila in df.iterrows():
+                sku = fila.get("SKU")
+                if sku in excepciones:
+                    df.at[i, "Categoria_Envio"] = excepciones[sku]
+                    aplicadas += 1
+            logger.info(f"Excepciones de envío aplicadas: {aplicadas} producto(s).")
+        except Exception as e:
+            logger.warning(f"No se pudo leer excepciones_envio.csv: {e}")
+    else:
+        logger.info(
+            "No existe excepciones_envio.csv (opcional) — usando solo "
+            "detección automática por palabras clave."
+        )
+
+    return df
+
+
+def respetar_precios_manuales(df_nuevo: pd.DataFrame, ruta_csv_anterior: str) -> pd.DataFrame:
+    """
+    Si ya existe un productos_actuales.csv de una corrida anterior, conserva
+    el precio que estaba ahí para cada SKU (por si lo editaste a mano en
+    Excel), en vez de sobrescribirlo con el precio recién scrapeado.
+    Los productos nuevos sí usan el precio del proveedor (no hay nada previo
+    que conservar).
+    """
+    if not os.path.exists(ruta_csv_anterior):
+        return df_nuevo
+
+    try:
+        df_anterior = pd.read_csv(ruta_csv_anterior, encoding="utf-8-sig")
+    except Exception as e:
+        logger.warning(f"No se pudo leer el CSV anterior para conservar precios: {e}")
+        return df_nuevo
+
+    if "SKU" not in df_anterior.columns or "Precio" not in df_anterior.columns:
+        return df_nuevo
+
+    precios_anteriores = df_anterior.set_index("SKU")["Precio"].to_dict()
+
+    conservados = 0
+    for i, fila in df_nuevo.iterrows():
+        sku = fila.get("SKU")
+        if sku in precios_anteriores:
+            df_nuevo.at[i, "Precio"] = precios_anteriores[sku]
+            conservados += 1
+
+    logger.info(f"Precios manuales conservados: {conservados} producto(s).")
+    return df_nuevo
+
+
+def subir_a_github():
+    """
+    Sube productos_actuales.csv al repo de GitHub automáticamente.
+    Requiere que esta carpeta sea un repo git ya clonado y con credenciales
+    configuradas (ver instrucciones de configuración inicial más abajo).
+    """
+    import subprocess
+
+    try:
+        subprocess.run(["git", "add", "productos_actuales.csv"], check=True)
+        resultado = subprocess.run(
+            ["git", "commit", "-m", "Actualizacion de catalogo"],
+            capture_output=True, text=True,
+        )
+        if resultado.returncode != 0:
+            logger.info("Nada nuevo que commitear (el catálogo no cambió).")
+            return
+        subprocess.run(["git", "push"], check=True)
+        logger.info("CSV subido a GitHub correctamente.")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"No se pudo subir a GitHub automáticamente: {e}")
 
 
 if __name__ == "__main__":
