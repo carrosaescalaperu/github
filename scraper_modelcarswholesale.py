@@ -74,7 +74,7 @@ from openpyxl.utils import get_column_letter
 # 1. CONFIGURACIÓN GENERAL
 # ==============================================================================
 
-BASE_URL = "https://www.modelcarswholesale.com/search?keyword=&scale=all&type=available&country=all"
+BASE_URL = "https://www.modelcarswholesale.com"
 
 # AJUSTAR: rutas reales de las secciones que quieres scrapear.
 # Entra al menú del sitio, haz click en "Available" / "All Available" /
