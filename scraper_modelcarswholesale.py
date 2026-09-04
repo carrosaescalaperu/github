@@ -424,6 +424,7 @@ def scrapear_con_playwright(usar_login: bool = False) -> pd.DataFrame:
             if usuario and clave:
                 try:
                     page.goto(f"{BASE_URL}/login", timeout=30000)
+                    page.wait_for_timeout(2000)
                     page.fill('input[name="username"]', usuario)
                     page.fill('input[name="password"]', clave)
                     page.click('button:has-text("Sign in")')
@@ -435,6 +436,15 @@ def scrapear_con_playwright(usar_login: bool = False) -> pd.DataFrame:
                         logger.warning("El login no se pudo confirmar (no aparece 'Log out'/'Welcome').")
                 except Exception as e:
                     logger.error(f"No se pudo iniciar sesión con Playwright: {e}")
+                    # DEBUG: guarda screenshot + HTML para ver qué le sirvió
+                    # el sitio realmente al runner (posible bloqueo/Cloudflare)
+                    try:
+                        page.screenshot(path="debug_login.png", full_page=True)
+                        with open("debug_login.html", "w", encoding="utf-8") as f:
+                            f.write(page.content())
+                        logger.info("Guardado debug_login.png / debug_login.html para diagnóstico.")
+                    except Exception as e2:
+                        logger.error(f"No se pudo guardar el debug: {e2}")
             else:
                 logger.info(
                     "No se encontraron credenciales en variables de entorno "
