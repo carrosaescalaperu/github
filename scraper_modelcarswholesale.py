@@ -238,7 +238,9 @@ def extraer_productos_de_pagina(html: str, url_pagina: str) -> list[dict]:
             url_producto = urljoin(BASE_URL, enlace_tag["href"]) if enlace_tag and enlace_tag.has_attr("href") else None
 
             # --- Precio ---
-            precio_tag = tarjeta.select_one(".price b")
+            # Si el producto está en descuento, el precio real está en
+            # ".special-price" (no en ".price"). Se prioriza ese si existe.
+            precio_tag = tarjeta.select_one(".special-price b") or tarjeta.select_one(".price b")
             precio_texto = precio_tag.get_text(strip=True) if precio_tag else ""
             precio = limpiar_precio(precio_texto)
 
